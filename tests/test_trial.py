@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -62,6 +64,24 @@ class TrialTests(unittest.TestCase):
         ]:
             with self.subTest(field=field, value=value), self.assertRaises(ValueError):
                 trial.inputs(self.environment(**{field: value}))
+
+    def test_production_cli_serializes_empty_seed_as_string_not_null(self):
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root) / "outputs"
+            env = {
+                **os.environ, **self.environment(), "GITHUB_OUTPUT": str(output),
+                "ARCHIL_API_KEY": "dummy-secret-not-forwarded",
+            }
+            subprocess.run(
+                [sys.executable, str(Path(trial.__file__)), "validate"],
+                env=env, check=True, capture_output=True, text=True,
+            )
+            lines = dict(line.split("=", 1) for line in output.read_text().splitlines())
+            guest = json.loads(lines["guest_environment"])
+            self.assertEqual(guest["CI_BENCH_SEED_ID"], "")
+            self.assertEqual(guest["CI_BENCH_RUN_ATTEMPT"], "2")
+            self.assertTrue(all(isinstance(value, str) for value in guest.values()))
+            self.assertNotIn("dummy-secret", lines["guest_environment"])
 
     def test_successful_receipt_requires_published_archive(self):
         with tempfile.TemporaryDirectory() as root:

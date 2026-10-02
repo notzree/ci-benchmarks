@@ -67,6 +67,22 @@ def inputs(env):
     return values
 
 
+def guest_environment(env, values):
+    commit = env["GITHUB_SHA"]
+    if not SHA.fullmatch(commit):
+        raise ValueError("consumer commit must be a full SHA")
+    return {
+        "CI_BENCH_WORKLOAD": values["workload"],
+        "CI_BENCH_CACHE_ROOT": "/workspace/cache",
+        "CI_BENCH_SERIES": values["series"],
+        "CI_BENCH_TRIAL": values["trial"],
+        "CI_BENCH_SEED_ID": values["seed_id"],
+        "CI_BENCH_RUN_ID": positive(env["GITHUB_RUN_ID"], "run ID"),
+        "CI_BENCH_RUN_ATTEMPT": positive(env["GITHUB_RUN_ATTEMPT"], "run attempt"),
+        "CI_BENCH_COMMIT": commit,
+    }
+
+
 def write_receipt(env, run=subprocess.run):
     provider = env["CI_BENCH_PROVIDER"]
     workload = env["CI_BENCH_WORKLOAD"]
@@ -135,6 +151,8 @@ def main():
             values = inputs(os.environ)
             with open(os.environ["GITHUB_OUTPUT"], "a") as output:
                 output.write(f"seed_id={values['seed_id']}\ncache_key={values['cache_key']}\n")
+                environment = json.dumps(guest_environment(os.environ, values), separators=(",", ":"))
+                output.write(f"guest_environment={environment}\n")
     except (KeyError, ValueError, OSError, subprocess.SubprocessError) as error:
         parser.exit(1, f"Trial validation failed: {error}\n")
 

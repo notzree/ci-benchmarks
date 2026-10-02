@@ -55,6 +55,7 @@ jobs:
     outputs:
       seed_id: ${{ steps.inputs.outputs.seed_id }}
       cache_key: ${{ steps.inputs.outputs.cache_key }}
+      guest_environment: ${{ steps.inputs.outputs.guest_environment }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -147,17 +148,7 @@ jobs:
           retain-template: ${{ inputs.scenario == 'seed' }}
           bootstrap-command: HOME=/root bash scripts/bootstrap.sh
           warm-command: ${{ inputs.scenario == 'seed' && 'HOME=/root python3 scripts/workload.py run --provider archil --workload "$CI_BENCH_WORKLOAD" --scenario seed --cache-root "$CI_BENCH_CACHE_ROOT" --output "$CI_BENCH_CACHE_ROOT/seed-output" --series "$CI_BENCH_SERIES" --trial "$CI_BENCH_TRIAL" --seed-id "$CI_BENCH_SEED_ID"' || '' }}
-          environment: |
-            {
-              "CI_BENCH_WORKLOAD": ${{ toJSON(inputs.workload) }},
-              "CI_BENCH_CACHE_ROOT": "/workspace/cache",
-              "CI_BENCH_SERIES": ${{ toJSON(inputs.series) }},
-              "CI_BENCH_TRIAL": ${{ toJSON(inputs.trial) }},
-              "CI_BENCH_SEED_ID": ${{ toJSON(needs.validate.outputs.seed_id) }},
-              "CI_BENCH_RUN_ID": ${{ toJSON(format('{0}', github.run_id)) }},
-              "CI_BENCH_RUN_ATTEMPT": ${{ toJSON(format('{0}', github.run_attempt)) }},
-              "CI_BENCH_COMMIT": ${{ toJSON(github.sha) }}
-            }
+          environment: ${{ needs.validate.outputs.guest_environment }}
       - name: Upload provisioning results
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
