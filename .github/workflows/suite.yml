@@ -1,0 +1,92 @@
+name: Compare CI runners
+run-name: Compare ${{ inputs.workload }} cold/warm (${{ inputs.trials }} trials, ${{ inputs.providers }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      workload:
+        description: Real upstream workload(s)
+        type: choice
+        options: [vue, hugo, all]
+        default: all
+      providers:
+        description: GitHub-only baseline or GitHub plus Archil native
+        type: choice
+        options: [github, both]
+        default: both
+      trials:
+        description: Independent trials per provider/scenario (1 smoke; 5 recommended; maximum 10)
+        default: '5'
+      retain-seeds:
+        description: Keep sources/archive caches after suite (Archil storage remains billed)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  suite:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BENCH_REPOSITORY: ${{ github.repository }}
+      BENCH_REF: ${{ github.ref_name }}
+      BENCH_WORKLOAD: ${{ inputs.workload }}
+      BENCH_PROVIDERS: ${{ inputs.providers }}
+      BENCH_TRIALS: ${{ inputs.trials }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set output path
+        run: echo "BENCH_RESULTS=$RUNNER_TEMP/ci-benchmark-results" >> "$GITHUB_ENV"
+      - name: Run independent cold and warm trials
+        shell: bash
+        run: |
+          workloads="$BENCH_WORKLOAD"
+          providers="$BENCH_PROVIDERS"
+          if [[ "$workloads" == all ]]; then workloads=vue,hugo; fi
+          if [[ "$providers" == both ]]; then providers=github,archil; fi
+          python3 scripts/suite.py \
+            --repository "$BENCH_REPOSITORY" --ref "$BENCH_REF" \
+            --workloads "$workloads" --providers "$providers" \
+            --trials "$BENCH_TRIALS" --output "$BENCH_RESULTS"
+      - name: Summarize raw trial measurements
+        if: always()
+        run: |
+          python3 scripts/report.py "$BENCH_RESULTS" --output "$BENCH_RESULTS/report"
+          cat "$BENCH_RESULTS/report/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Check out pinned lifecycle implementation
+        if: always() && !inputs.retain-seeds && inputs.providers == 'both'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: notzree/archil-ci
+          ref: 9a5ae8ba1d491202de15025842c91921d246d95f
+          path: .archil-action
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: always() && !inputs.retain-seeds && inputs.providers == 'both'
+        with:
+          node-version: '24'
+      - name: Install pinned lifecycle dependencies
+        if: always() && !inputs.retain-seeds && inputs.providers == 'both'
+        run: npm ci --ignore-scripts --prefix .archil-action
+      - name: Evict only this suite's immutable seeds
+        if: always() && !inputs.retain-seeds
+        env:
+          ARCHIL_API_KEY: ${{ secrets.ARCHIL_API_KEY }}
+          GH_RUNNER_ADMIN_TOKEN: ${{ secrets.GH_RUNNER_ADMIN_TOKEN }}
+        run: |
+          python3 scripts/cleanup_seeds.py \
+            --directory "$BENCH_RESULTS" --action-root "$GITHUB_WORKSPACE/.archil-action"
+      - name: Upload complete results and run receipts
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: ci-benchmark-suite-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-benchmark-results
+          if-no-files-found: error
+          retention-days: 30

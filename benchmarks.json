@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "phase_timeout_seconds": 1800,
+  "toolchains": {
+    "node": {
+      "version": "22.11.0",
+      "url": "https://nodejs.org/dist/v22.11.0/node-v22.11.0-linux-x64.tar.gz",
+      "checksum_source": "https://nodejs.org/dist/v22.11.0/SHASUMS256.txt",
+      "sha256": "4f862bab52039835efbe613b532238b6e4dde98d139a34e6923193e073438b13",
+      "prefix": "node-v22.11.0-linux-x64",
+      "binary": "bin/node"
+    },
+    "pnpm": {
+      "version": "9.12.3",
+      "url": "https://registry.npmjs.org/pnpm/-/pnpm-9.12.3.tgz",
+      "checksum_source": "https://registry.npmjs.org/pnpm/9.12.3",
+      "sha512_base64": "zOD53pxafJW++UQWnMXf6HQav7FFB4wNUIuGgFaEiofIHmJiRstglny9f9KabAYu9z/4QNlrPIbECsks9KgT7g==",
+      "prefix": "package",
+      "binary": "bin/pnpm.cjs"
+    },
+    "go": {
+      "version": "1.23.3",
+      "url": "https://go.dev/dl/go1.23.3.linux-amd64.tar.gz",
+      "checksum_source": "https://go.dev/dl/?mode=json&include=all",
+      "sha256": "a0afb9744c00648bafb1b90b4aba5bdb86f424f02f9275399ce0c20b93a2c3a8",
+      "prefix": "go",
+      "binary": "bin/go"
+    }
+  },
+  "workloads": {
+    "vue": {
+      "version": "3.5.13",
+      "repository": "https://github.com/vuejs/core.git",
+      "upstream_sha": "6eb29d345aa73746207f80c89ee8b37ff7b949c9",
+      "tools": ["node", "pnpm"],
+      "commands": {
+        "install": ["pnpm", "install", "--frozen-lockfile", "--store-dir", "{state}/pnpm-store"],
+        "build": ["pnpm", "build"],
+        "test": ["pnpm", "test-unit", "--run", "--maxWorkers=4", "--minWorkers=1"]
+      }
+    },
+    "hugo": {
+      "version": "0.139.3",
+      "repository": "https://github.com/gohugoio/hugo.git",
+      "upstream_sha": "2f6864387cd31b975914e8373d4bf38bddbd47bc",
+      "tools": ["go"],
+      "commands": {
+        "install": ["go", "mod", "download"],
+        "build": ["go", "build", "-mod=readonly", "-p", "4", "-o", "{state}/bin/hugo", "."]
+      }
+    }
+  }
+}

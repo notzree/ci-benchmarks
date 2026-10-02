@@ -1,0 +1,251 @@
+name: CI benchmark trial
+run-name: ci-bench/${{ inputs.provider }}/${{ inputs.workload }}/${{ inputs.scenario }}/${{ inputs.series }}/${{ inputs.trial }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: Runner provider
+        type: choice
+        options: [github, archil]
+        default: github
+      workload:
+        description: Pinned real upstream workload
+        type: choice
+        options: [vue, hugo]
+        default: vue
+      scenario:
+        description: Cold trial, successful seed preparation, or fresh-runner warm trial
+        type: choice
+        options: [cold, seed, warm]
+        default: cold
+      series:
+        description: Comparison series identifier
+        default: manual
+      trial:
+        description: Positive sample number
+        default: '1'
+      seed-id:
+        description: Seed identity (required warm; generated if blank for seed)
+        default: ''
+      template-id:
+        description: Archil stopped source UUID (required Archil warm)
+        default: ''
+      cache-key:
+        description: Exact archive seed key (required GitHub warm)
+        default: ''
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CI_BENCH_PROVIDER: ${{ inputs.provider }}
+  CI_BENCH_WORKLOAD: ${{ inputs.workload }}
+  CI_BENCH_SCENARIO: ${{ inputs.scenario }}
+  CI_BENCH_SERIES: ${{ inputs.series }}
+  CI_BENCH_TRIAL: ${{ inputs.trial }}
+  CI_BENCH_REGION: ${{ vars.ARCHIL_CI_REGION || 'aws-us-east-1' }}
+
+jobs:
+  validate:
+    name: Validate trial inputs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      seed_id: ${{ steps.inputs.outputs.seed_id }}
+      cache_key: ${{ steps.inputs.outputs.cache_key }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - id: inputs
+        env:
+          CI_BENCH_SEED_ID: ${{ inputs.seed-id }}
+          CI_BENCH_TEMPLATE_ID: ${{ inputs.template-id }}
+          CI_BENCH_CACHE_KEY: ${{ inputs.cache-key }}
+        run: python3 scripts/trial.py validate
+
+  github:
+    name: GitHub-hosted benchmark
+    needs: validate
+    if: inputs.provider == 'github'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CI_BENCH_SEED_ID: ${{ needs.validate.outputs.seed_id }}
+      CI_BENCH_CACHE_KEY: ${{ needs.validate.outputs.cache_key }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set isolated paths
+        run: |
+          echo "CI_BENCH_CACHE_ROOT=$RUNNER_TEMP/ci-bench-cache" >> "$GITHUB_ENV"
+          echo "BENCH_OUTPUT=$RUNNER_TEMP/bench-results" >> "$GITHUB_ENV"
+      - name: Restore immutable seed
+        if: inputs.scenario == 'warm'
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ env.CI_BENCH_CACHE_ROOT }}
+          key: ${{ env.CI_BENCH_CACHE_KEY }}
+          fail-on-cache-miss: true
+      - name: Execute shared workload
+        shell: bash
+        run: |
+          python3 scripts/workload.py run \
+            --provider "$CI_BENCH_PROVIDER" --workload "$CI_BENCH_WORKLOAD" \
+            --scenario "$CI_BENCH_SCENARIO" --cache-root "$CI_BENCH_CACHE_ROOT" \
+            --output "$BENCH_OUTPUT" --series "$CI_BENCH_SERIES" \
+            --trial "$CI_BENCH_TRIAL" --seed-id "$CI_BENCH_SEED_ID"
+      - name: Save immutable seed
+        if: inputs.scenario == 'seed'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ env.CI_BENCH_CACHE_ROOT }}
+          key: ${{ env.CI_BENCH_CACHE_KEY }}
+      - name: Publish seed receipt
+        if: inputs.scenario == 'seed'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/trial.py receipt
+      - name: Upload workload results
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: bench-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bench-results
+          if-no-files-found: warn
+          retention-days: 14
+
+  provision:
+    name: Prepare Archil runner
+    needs: validate
+    if: inputs.provider == 'archil'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      runner_label: ${{ steps.prepare.outputs.runner-label }}
+      runner_name: ${{ steps.prepare.outputs.runner-name }}
+      template_id: ${{ steps.prepare.outputs.template-id }}
+      template_retained: ${{ steps.prepare.outputs.template-retained }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - id: prepare
+        uses: notzree/archil-ci@9a5ae8ba1d491202de15025842c91921d246d95f
+        with:
+          operation: provision
+          api-key: ${{ secrets.ARCHIL_API_KEY }}
+          runner-admin-token: ${{ secrets.GH_RUNNER_ADMIN_TOKEN }}
+          region: ${{ env.CI_BENCH_REGION }}
+          vcpus: '4'
+          memory-mib: '16384'
+          cache-root: /workspace/cache
+          template-id: ${{ inputs.template-id }}
+          retain-template: ${{ inputs.scenario == 'seed' }}
+          bootstrap-command: HOME=/root bash scripts/bootstrap.sh
+          warm-command: ${{ inputs.scenario == 'seed' && 'HOME=/root python3 scripts/workload.py run --provider archil --workload "$CI_BENCH_WORKLOAD" --scenario seed --cache-root "$CI_BENCH_CACHE_ROOT" --output "$CI_BENCH_CACHE_ROOT/seed-output" --series "$CI_BENCH_SERIES" --trial "$CI_BENCH_TRIAL" --seed-id "$CI_BENCH_SEED_ID"' || '' }}
+          environment: |
+            {
+              "CI_BENCH_WORKLOAD": ${{ toJSON(inputs.workload) }},
+              "CI_BENCH_CACHE_ROOT": "/workspace/cache",
+              "CI_BENCH_SERIES": ${{ toJSON(inputs.series) }},
+              "CI_BENCH_TRIAL": ${{ toJSON(inputs.trial) }},
+              "CI_BENCH_SEED_ID": ${{ toJSON(needs.validate.outputs.seed_id) }},
+              "CI_BENCH_RUN_ID": ${{ toJSON(format('{0}', github.run_id)) }},
+              "CI_BENCH_RUN_ATTEMPT": ${{ toJSON(format('{0}', github.run_attempt)) }},
+              "CI_BENCH_COMMIT": ${{ toJSON(github.sha) }}
+            }
+      - name: Upload provisioning results
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: provision-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/archil-ci-results
+          if-no-files-found: warn
+          retention-days: 14
+
+  native:
+    name: Archil native benchmark
+    needs: [validate, provision]
+    runs-on: [self-hosted, linux, x64, "${{ needs.provision.outputs.runner_label }}"]
+    timeout-minutes: 45
+    env:
+      CI_BENCH_CACHE_ROOT: /workspace/cache
+      CI_BENCH_SEED_ID: ${{ needs.validate.outputs.seed_id }}
+      CI_BENCH_TEMPLATE_ID: ${{ needs.provision.outputs.template_id }}
+    steps:
+      - name: Set result path
+        run: echo "BENCH_OUTPUT=$RUNNER_TEMP/bench-results" >> "$GITHUB_ENV"
+      - name: Confirm native runner identity
+        env:
+          EXPECTED_RUNNER: ${{ needs.provision.outputs.runner_name }}
+        run: |
+          test "$RUNNER_NAME" = "$EXPECTED_RUNNER"
+          test "$(id -u)" != 0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Execute shared workload
+        shell: bash
+        run: |
+          if [[ "$CI_BENCH_SCENARIO" == seed ]]; then
+            python3 scripts/workload.py verify-seed \
+              --workload "$CI_BENCH_WORKLOAD" --cache-root "$CI_BENCH_CACHE_ROOT" \
+              --seed-id "$CI_BENCH_SEED_ID" --output "$BENCH_OUTPUT"
+            python3 scripts/trial.py receipt
+          else
+            python3 scripts/workload.py run \
+              --provider "$CI_BENCH_PROVIDER" --workload "$CI_BENCH_WORKLOAD" \
+              --scenario "$CI_BENCH_SCENARIO" --cache-root "$CI_BENCH_CACHE_ROOT" \
+              --output "$BENCH_OUTPUT" --series "$CI_BENCH_SERIES" \
+              --trial "$CI_BENCH_TRIAL" --seed-id "$CI_BENCH_SEED_ID"
+          fi
+      - name: Upload workload results
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: bench-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bench-results
+          if-no-files-found: warn
+          retention-days: 14
+
+  watchdog:
+    name: Bound native runner lifetime
+    needs: provision
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: notzree/archil-ci@9a5ae8ba1d491202de15025842c91921d246d95f
+        with:
+          operation: watch
+          api-key: ${{ secrets.ARCHIL_API_KEY }}
+          runner-admin-token: ${{ secrets.GH_RUNNER_ADMIN_TOKEN }}
+          region: ${{ env.CI_BENCH_REGION }}
+          runner-name: ${{ needs.provision.outputs.runner_name }}
+          runner-label: ${{ needs.provision.outputs.runner_label }}
+          template-id: ${{ inputs.template-id }}
+          retain-template: ${{ needs.provision.outputs.template_retained || 'false' }}
+          job-name: Archil native benchmark
+          watchdog-timeout-seconds: '3300'
+
+  cleanup:
+    name: Remove native runner
+    needs: [provision, native, watchdog]
+    if: always() && inputs.provider == 'archil'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: notzree/archil-ci@9a5ae8ba1d491202de15025842c91921d246d95f
+        with:
+          operation: cleanup
+          api-key: ${{ secrets.ARCHIL_API_KEY }}
+          runner-admin-token: ${{ secrets.GH_RUNNER_ADMIN_TOKEN }}
+          region: ${{ env.CI_BENCH_REGION }}
+          template-id: ${{ inputs.template-id }}
+          retain-template: ${{ inputs.scenario == 'seed' && needs.native.result == 'success' && needs.watchdog.result == 'success' }}
